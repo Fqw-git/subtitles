@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -12,16 +11,6 @@ def run_cmd(cmd: list[str]) -> None:
         raise SystemExit(f"Command not found: {cmd[0]}") from exc
     except subprocess.CalledProcessError as exc:
         raise SystemExit(f"Command failed: {' '.join(cmd)}") from exc
-
-
-def ensure_ffmpeg() -> str:
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise SystemExit(
-            "ffmpeg was not found in PATH. Please install ffmpeg first."
-        )
-    return ffmpeg
-
 
 def resolve_output_path(raw_path: str) -> Path:
     return Path(raw_path).expanduser().resolve()

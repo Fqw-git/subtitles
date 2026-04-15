@@ -4,19 +4,32 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 
-@dataclass
-class SegmentResult:
+class SpeechRecognitionError(RuntimeError):
+    """Raised when speech recognition cannot proceed."""
+
+
+@dataclass(frozen=True)
+class SpeechRecognitionConfig:
+    model_name: str
+    language: str
+    beam_size: int
+    vad_filter: bool = True
+
+
+@dataclass(frozen=True)
+class TranscriptSegment:
     start: float
     end: float
     text: str
 
 
-@dataclass
+@dataclass(frozen=True)
 class TranscriptResult:
     language: str
     language_probability: float
     text: str
-    segments: list[SegmentResult]
+    segments: list[TranscriptSegment]
+    model_name: str
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

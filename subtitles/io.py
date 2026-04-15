@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from subtitles.models import TranscriptResult
+from subtitles.asr.models import TranscriptResult
 
 
 def save_transcript(result: TranscriptResult, output: Path) -> None:
