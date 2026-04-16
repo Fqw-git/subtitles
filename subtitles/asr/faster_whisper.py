@@ -98,7 +98,7 @@ class FasterWhisperRecognizer(SpeechRecognizer):
 
     def transcribe(
         self,
-        audio: Path | BinaryIO,
+        audio: Path | BinaryIO | object,
         config: SpeechRecognitionConfig,
     ) -> TranscriptResult:
         return self._transcribe_internal(audio, config)
@@ -112,7 +112,7 @@ class FasterWhisperRecognizer(SpeechRecognizer):
 
     def _transcribe_internal(
         self,
-        audio: Path | BinaryIO,
+        audio: Path | BinaryIO | object,
         config: SpeechRecognitionConfig,
     ) -> TranscriptResult:
         model = self._create_model(config.model_name)
@@ -158,7 +158,7 @@ class FasterWhisperRecognizer(SpeechRecognizer):
             model_name=config.model_name,
         )
 
-    def _run_transcribe(self, model, audio: Path | BinaryIO, config: SpeechRecognitionConfig):
+    def _run_transcribe(self, model, audio: Path | BinaryIO | object, config: SpeechRecognitionConfig):
         segments, info = model.transcribe(
             str(audio) if isinstance(audio, Path) else audio,
             language=config.language,

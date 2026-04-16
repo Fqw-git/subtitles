@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import io
-import wave
 from dataclasses import dataclass
 
 from subtitles.asr import SpeechRecognitionConfig, SpeechRecognizer, TranscriptResult
-from subtitles.audio import AudioCaptureConfig, AudioChunk, AudioCapturer
+from subtitles.audio import AudioCaptureConfig, AudioCapturer
 from subtitles.streaming.buffer import SlidingAudioBuffer
 from subtitles.streaming.delta import TranscriptDelta, TranscriptDeltaTracker
 
@@ -40,18 +38,6 @@ class StreamingRecognitionSession:
         self.capturer = capturer
         self.recognizer = recognizer
 
-    def _build_window_wav_buffer(self, chunks: list[AudioChunk]) -> io.BytesIO:
-        first_chunk = chunks[0]
-        audio_buffer = io.BytesIO()
-
-        with wave.open(audio_buffer, "wb") as wav_file:
-            wav_file.setnchannels(first_chunk.channels)
-            wav_file.setsampwidth(first_chunk.sample_width)
-            wav_file.setframerate(first_chunk.sample_rate)
-            wav_file.writeframes(b"".join(chunk.data for chunk in chunks))
-        audio_buffer.seek(0)
-        return audio_buffer
-
     def iter_events(self, config: StreamingSessionConfig):
         if config.window_seconds <= 0:
             raise ValueError("window_seconds must be greater than 0.")
@@ -79,9 +65,8 @@ class StreamingRecognitionSession:
                 continue
 
             update_index += 1
-            audio_buffer = self._build_window_wav_buffer(window_chunks)
             transcript_result = self.recognizer.transcribe(
-                audio_buffer,
+                buffer.export_waveform(),
                 config.recognition,
             )
             window_start, window_end = buffer.current_time_range()

@@ -11,7 +11,7 @@ class SpeechRecognizer(ABC):
     @abstractmethod
     def transcribe(
         self,
-        audio: Path | BinaryIO,
+        audio: Path | BinaryIO | object,
         config: SpeechRecognitionConfig,
     ) -> TranscriptResult:
         """Transcribe audio from a file path or in-memory binary stream."""
