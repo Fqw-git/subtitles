@@ -28,6 +28,7 @@ from subtitles.demo import (
     RealtimeSystemAudioTranscriptionDemo,
 )
 from subtitles.io import print_transcript, save_transcript
+from subtitles.overlay import SubtitleOverlayApp
 from subtitles.utils import resolve_output_path, validate_audio_file
 
 
@@ -117,6 +118,26 @@ def handle_demo_command(args: argparse.Namespace) -> None:
         print()
 
 
+def handle_overlay_command(args: argparse.Namespace) -> None:
+    app = SubtitleOverlayApp(
+        RealtimeDemoConfig(
+            capture=AudioCaptureConfig(
+                seconds=0,
+                sample_rate=args.sample_rate,
+                channels=args.channels,
+                frames_per_buffer=args.frames_per_buffer,
+                device_name=args.device,
+            ),
+            recognition=build_recognition_config(args),
+            window_seconds=args.window_seconds,
+            step_seconds=args.step_seconds,
+            stability_seconds=args.stability_seconds,
+            max_updates=args.max_updates,
+        )
+    )
+    app.run()
+
+
 def handle_transcribe_command(args: argparse.Namespace) -> None:
     recognizer = FasterWhisperRecognizer()
     audio_path = resolve_output_path(args.audio_file)
@@ -183,6 +204,22 @@ def build_parser() -> argparse.ArgumentParser:
     demo_parser.add_argument("--language", default=DEFAULT_LANGUAGE)
     demo_parser.add_argument("--beam-size", type=int, default=DEFAULT_BEAM_SIZE)
 
+    overlay_parser = subparsers.add_parser(
+        "overlay",
+        help="Show realtime subtitles in a floating window.",
+    )
+    overlay_parser.add_argument("--window-seconds", type=float, default=6.0)
+    overlay_parser.add_argument("--step-seconds", type=float, default=1.0)
+    overlay_parser.add_argument("--stability-seconds", type=float, default=2.0)
+    overlay_parser.add_argument("--device", default=None)
+    overlay_parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE)
+    overlay_parser.add_argument("--channels", type=int, default=DEFAULT_CHANNELS)
+    overlay_parser.add_argument("--frames-per-buffer", type=int, default=1024)
+    overlay_parser.add_argument("--max-updates", type=int, default=None)
+    overlay_parser.add_argument("--model", default=DEFAULT_MODEL)
+    overlay_parser.add_argument("--language", default=DEFAULT_LANGUAGE)
+    overlay_parser.add_argument("--beam-size", type=int, default=DEFAULT_BEAM_SIZE)
+
     transcribe_parser = subparsers.add_parser(
         "transcribe",
         help="Transcribe an existing audio file.",
@@ -213,6 +250,10 @@ def main() -> None:
 
         if args.command == "demo":
             handle_demo_command(args)
+            return
+
+        if args.command == "overlay":
+            handle_overlay_command(args)
             return
 
         if args.command == "transcribe":
