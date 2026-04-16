@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import math
 import wave
+from collections.abc import Iterator
 from pathlib import Path
 
 from subtitles.audio.base import AudioCapturer
 from subtitles.audio.models import (
     AudioCaptureConfig,
+    AudioChunk,
     AudioCaptureDevice,
     AudioCaptureError,
     AudioCaptureResult,
@@ -76,13 +78,11 @@ class PyAudioWasapiLoopbackCapturer(AudioCapturer):
             f"Loopback device not found: {device_name}\nAvailable devices: {available}"
         )
 
-    def _validate_config(
+    def _validate_common_config(
         self,
         device: AudioCaptureDevice,
         config: AudioCaptureConfig,
     ) -> None:
-        if config.seconds <= 0:
-            raise AudioCaptureError("--seconds must be greater than 0.")
         if config.sample_rate <= 0:
             raise AudioCaptureError("--sample-rate must be greater than 0.")
         if config.channels <= 0:
@@ -94,6 +94,15 @@ class PyAudioWasapiLoopbackCapturer(AudioCapturer):
                 f"Requested {config.channels} channel(s), but device "
                 f"'{device.name}' supports at most {device.max_input_channels}."
             )
+
+    def _validate_capture_to_file_config(
+        self,
+        device: AudioCaptureDevice,
+        config: AudioCaptureConfig,
+    ) -> None:
+        self._validate_common_config(device, config)
+        if config.seconds <= 0:
+            raise AudioCaptureError("--seconds must be greater than 0.")
 
     def _write_wave_file(
         self,
@@ -109,6 +118,50 @@ class PyAudioWasapiLoopbackCapturer(AudioCapturer):
             wav_file.setframerate(sample_rate)
             wav_file.writeframes(frame_bytes)
 
+    def _open_input_stream(
+        self,
+        audio,
+        pyaudio,
+        device: AudioCaptureDevice,
+        config: AudioCaptureConfig,
+    ):
+        return audio.open(
+            format=pyaudio.paInt16,
+            channels=config.channels,
+            rate=config.sample_rate,
+            frames_per_buffer=config.frames_per_buffer,
+            input=True,
+            input_device_index=device.index,
+        )
+
+    def iter_chunks(self, config: AudioCaptureConfig) -> Iterator[AudioChunk]:
+        pyaudio = self._load_pyaudio()
+        device = self.resolve_device(config.device_name)
+        self._validate_common_config(device, config)
+
+        with pyaudio.PyAudio() as audio:
+            sample_width = audio.get_sample_size(pyaudio.paInt16)
+            with self._open_input_stream(audio, pyaudio, device, config) as stream:
+                current_time = 0.0
+                while True:
+                    data = stream.read(
+                        config.frames_per_buffer,
+                        exception_on_overflow=False,
+                    )
+                    frames = len(data) // (config.channels * sample_width)
+                    duration = frames / config.sample_rate
+                    yield AudioChunk(
+                        data=data,
+                        sample_rate=config.sample_rate,
+                        channels=config.channels,
+                        sample_width=sample_width,
+                        frames=frames,
+                        start_time=current_time,
+                        end_time=current_time + duration,
+                        device=device,
+                    )
+                    current_time += duration
+
     def capture_to_file(
         self,
         output_path: Path,
@@ -116,7 +169,7 @@ class PyAudioWasapiLoopbackCapturer(AudioCapturer):
     ) -> AudioCaptureResult:
         pyaudio = self._load_pyaudio()
         device = self.resolve_device(config.device_name)
-        self._validate_config(device, config)
+        self._validate_capture_to_file_config(device, config)
 
         chunk_count = max(
             1,
@@ -126,14 +179,7 @@ class PyAudioWasapiLoopbackCapturer(AudioCapturer):
 
         with pyaudio.PyAudio() as audio:
             sample_width = audio.get_sample_size(pyaudio.paInt16)
-            with audio.open(
-                format=pyaudio.paInt16,
-                channels=config.channels,
-                rate=config.sample_rate,
-                frames_per_buffer=config.frames_per_buffer,
-                input=True,
-                input_device_index=device.index,
-            ) as stream:
+            with self._open_input_stream(audio, pyaudio, device, config) as stream:
                 chunks: list[bytes] = []
                 for _ in range(chunk_count):
                     chunks.append(

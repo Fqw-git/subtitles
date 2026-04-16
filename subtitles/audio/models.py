@@ -28,6 +28,18 @@ class AudioCaptureConfig:
 
 
 @dataclass(frozen=True)
+class AudioChunk:
+    data: bytes
+    sample_rate: int
+    channels: int
+    sample_width: int
+    frames: int
+    start_time: float
+    end_time: float
+    device: AudioCaptureDevice
+
+
+@dataclass(frozen=True)
 class AudioCaptureResult:
     output_path: Path
     device: AudioCaptureDevice

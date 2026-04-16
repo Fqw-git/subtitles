@@ -23,6 +23,10 @@ from subtitles.config import (
     DEFAULT_RECORD_SECONDS,
     DEFAULT_SAMPLE_RATE,
 )
+from subtitles.demo import (
+    RealtimeDemoConfig,
+    RealtimeSystemAudioTranscriptionDemo,
+)
 from subtitles.io import print_transcript, save_transcript
 from subtitles.utils import resolve_output_path, validate_audio_file
 
@@ -67,6 +71,50 @@ def handle_capture_transcribe_command(args: argparse.Namespace) -> None:
     save_transcript(transcript, result_path)
     print(f"Captured from device: {capture_result.device.name}")
     print_transcript(transcript, result_path)
+
+
+def handle_demo_command(args: argparse.Namespace) -> None:
+    demo = RealtimeSystemAudioTranscriptionDemo(
+        capturer=PyAudioWasapiLoopbackCapturer(),
+        recognizer=FasterWhisperRecognizer(),
+    )
+
+    print("Starting realtime demo. Press Ctrl+C to stop.")
+    for event in demo.iter_events(
+        RealtimeDemoConfig(
+            capture=AudioCaptureConfig(
+                seconds=0,
+                sample_rate=args.sample_rate,
+                channels=args.channels,
+                frames_per_buffer=args.frames_per_buffer,
+                device_name=args.device,
+            ),
+            recognition=build_recognition_config(args),
+            window_seconds=args.window_seconds,
+            step_seconds=args.step_seconds,
+            stability_seconds=args.stability_seconds,
+            max_updates=args.max_updates,
+        )
+    ):
+        print(
+            f"[update {event.update_index}] "
+            f"window={event.window_start:.2f}s-{event.window_end:.2f}s"
+        )
+        if event.transcript_delta.committed_increment:
+            if event.transcript_delta.is_revision:
+                print(f"[revised] {event.transcript_delta.committed_increment}")
+            else:
+                print(event.transcript_delta.committed_increment)
+        elif event.transcript_delta.committed_text:
+            print("(no new committed text)")
+        elif event.transcript_delta.unstable_text:
+            print("(waiting for stable text)")
+        else:
+            print("(no speech detected)")
+
+        if event.transcript_delta.unstable_text:
+            print(f"[preview] {event.transcript_delta.unstable_text}")
+        print()
 
 
 def handle_transcribe_command(args: argparse.Namespace) -> None:
@@ -119,6 +167,22 @@ def build_parser() -> argparse.ArgumentParser:
     record_parser.add_argument("--language", default=DEFAULT_LANGUAGE)
     record_parser.add_argument("--beam-size", type=int, default=DEFAULT_BEAM_SIZE)
 
+    demo_parser = subparsers.add_parser(
+        "demo",
+        help="Run a realtime demo: capture system audio in chunks and transcribe each chunk.",
+    )
+    demo_parser.add_argument("--window-seconds", type=float, default=6.0)
+    demo_parser.add_argument("--step-seconds", type=float, default=1.0)
+    demo_parser.add_argument("--stability-seconds", type=float, default=2.0)
+    demo_parser.add_argument("--device", default=None)
+    demo_parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE)
+    demo_parser.add_argument("--channels", type=int, default=DEFAULT_CHANNELS)
+    demo_parser.add_argument("--frames-per-buffer", type=int, default=1024)
+    demo_parser.add_argument("--max-updates", type=int, default=None)
+    demo_parser.add_argument("--model", default=DEFAULT_MODEL)
+    demo_parser.add_argument("--language", default=DEFAULT_LANGUAGE)
+    demo_parser.add_argument("--beam-size", type=int, default=DEFAULT_BEAM_SIZE)
+
     transcribe_parser = subparsers.add_parser(
         "transcribe",
         help="Transcribe an existing audio file.",
@@ -147,6 +211,10 @@ def main() -> None:
             handle_capture_transcribe_command(args)
             return
 
+        if args.command == "demo":
+            handle_demo_command(args)
+            return
+
         if args.command == "transcribe":
             handle_transcribe_command(args)
             return
@@ -159,7 +227,7 @@ def main() -> None:
                 suffix = " (default)" if device.is_default else ""
                 print(f"- {device.name}{suffix}")
             return
-    except (AudioCaptureError, SpeechRecognitionError) as exc:
+    except (AudioCaptureError, SpeechRecognitionError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
 
     raise SystemExit("Unknown command")
