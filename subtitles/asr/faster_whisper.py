@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import BinaryIO
 
@@ -9,6 +10,7 @@ from subtitles.asr.models import (
     SpeechRecognitionError,
     TranscriptResult,
     TranscriptSegment,
+    TranscriptWord,
 )
 from subtitles.config import (
     DEFAULT_COMPUTE_TYPE,
@@ -16,6 +18,8 @@ from subtitles.config import (
     FALLBACK_COMPUTE_TYPE,
     FALLBACK_DEVICE,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class FasterWhisperRecognizer(SpeechRecognizer):
@@ -34,6 +38,7 @@ class FasterWhisperRecognizer(SpeechRecognizer):
         self.device = device
         self.compute_type = compute_type
         self._active_backend = (device, compute_type)
+        logger.info("ASR backend set to device=%s compute_type=%s", device, compute_type)
 
     def _clear_model_cache(self) -> None:
         self._model_cache.clear()
@@ -61,6 +66,7 @@ class FasterWhisperRecognizer(SpeechRecognizer):
     def _create_model(self, model_name: str):
         cached_model = self._model_cache.get(model_name)
         if cached_model is not None:
+            logger.debug("Using cached ASR model '%s' on %s/%s", model_name, self.device, self.compute_type)
             return cached_model
 
         whisper_model = self._load_model_class()
@@ -71,7 +77,20 @@ class FasterWhisperRecognizer(SpeechRecognizer):
                 compute_type=self.compute_type,
             )
             self._active_backend = (self.device, self.compute_type)
+            logger.info(
+                "Initialized ASR model '%s' with device=%s compute_type=%s",
+                model_name,
+                self.device,
+                self.compute_type,
+            )
         except Exception as exc:
+            logger.warning(
+                "Failed to initialize ASR model '%s' on %s/%s: %s",
+                model_name,
+                self.device,
+                self.compute_type,
+                exc,
+            )
             if (self.device, self.compute_type) == (
                 FALLBACK_DEVICE,
                 FALLBACK_COMPUTE_TYPE,
@@ -87,6 +106,12 @@ class FasterWhisperRecognizer(SpeechRecognizer):
                     compute_type=FALLBACK_COMPUTE_TYPE,
                 )
                 self._set_backend(FALLBACK_DEVICE, FALLBACK_COMPUTE_TYPE)
+                logger.info(
+                    "Initialized ASR model '%s' with fallback backend %s/%s",
+                    model_name,
+                    FALLBACK_DEVICE,
+                    FALLBACK_COMPUTE_TYPE,
+                )
             except Exception as fallback_exc:
                 raise SpeechRecognitionError(
                     f"Failed to initialize recognition model '{model_name}' "
@@ -116,11 +141,21 @@ class FasterWhisperRecognizer(SpeechRecognizer):
         config: SpeechRecognitionConfig,
     ) -> TranscriptResult:
         model = self._create_model(config.model_name)
+        logger.debug(
+            "Starting ASR transcription with model=%s backend=%s/%s language=%s beam=%s input_type=%s",
+            config.model_name,
+            self.device,
+            self.compute_type,
+            config.language,
+            config.beam_size,
+            type(audio).__name__,
+        )
 
         try:
             segments, info = self._run_transcribe(model, audio, config)
         except Exception as exc:
             if self.device == "cuda" and self._is_gpu_runtime_error(exc):
+                logger.warning("GPU runtime error during transcription, falling back to CPU: %s", exc)
                 self._set_backend(FALLBACK_DEVICE, FALLBACK_COMPUTE_TYPE)
                 self._clear_model_cache()
                 model = self._create_model(config.model_name)
@@ -145,24 +180,61 @@ class FasterWhisperRecognizer(SpeechRecognizer):
                     start=round(segment.start, 3),
                     end=round(segment.end, 3),
                     text=text,
+                    words=self._extract_words(segment),
                 )
             )
             if text:
                 full_text.append(text)
 
-        return TranscriptResult(
+        result = TranscriptResult(
             language=info.language,
             language_probability=info.language_probability,
             text="\n".join(full_text),
             segments=transcript_segments,
             model_name=config.model_name,
         )
+        logger.debug(
+            "Completed ASR transcription: segments=%s detected_language=%s language_prob=%.3f text=%r",
+            len(result.segments),
+            result.language,
+            result.language_probability,
+            result.text,
+        )
+        return result
 
-    def _run_transcribe(self, model, audio: Path | BinaryIO | object, config: SpeechRecognitionConfig):
+    def _run_transcribe(
+        self,
+        model,
+        audio: Path | BinaryIO | object,
+        config: SpeechRecognitionConfig,
+    ):
         segments, info = model.transcribe(
             str(audio) if isinstance(audio, Path) else audio,
             language=config.language,
             beam_size=config.beam_size,
             vad_filter=config.vad_filter,
+            word_timestamps=config.word_timestamps,
         )
         return list(segments), info
+
+    def _extract_words(self, segment) -> list[TranscriptWord]:
+        words: list[TranscriptWord] = []
+        raw_words = getattr(segment, "words", None)
+        if not raw_words:
+            return words
+
+        for word in raw_words:
+            text = getattr(word, "word", "").strip()
+            if not text:
+                continue
+
+            probability = getattr(word, "probability", None)
+            words.append(
+                TranscriptWord(
+                    start=round(float(getattr(word, "start", 0.0)), 3),
+                    end=round(float(getattr(word, "end", 0.0)), 3),
+                    word=text,
+                    probability=None if probability is None else float(probability),
+                )
+            )
+        return words

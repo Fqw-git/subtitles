@@ -28,6 +28,7 @@ from subtitles.demo import (
     RealtimeSystemAudioTranscriptionDemo,
 )
 from subtitles.io import print_transcript, save_transcript
+from subtitles.logging_utils import configure_logging
 from subtitles.overlay import SubtitleOverlayApp
 from subtitles.utils import resolve_output_path, validate_audio_file
 
@@ -47,6 +48,7 @@ def build_recognition_config(args: argparse.Namespace) -> SpeechRecognitionConfi
         model_name=args.model,
         language=args.language,
         beam_size=args.beam_size,
+        word_timestamps=getattr(args, "word_timestamps", False),
     )
 
 
@@ -203,13 +205,18 @@ def build_parser() -> argparse.ArgumentParser:
     demo_parser.add_argument("--model", default=DEFAULT_MODEL)
     demo_parser.add_argument("--language", default=DEFAULT_LANGUAGE)
     demo_parser.add_argument("--beam-size", type=int, default=DEFAULT_BEAM_SIZE)
+    demo_parser.add_argument(
+        "--word-timestamps",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
 
     overlay_parser = subparsers.add_parser(
         "overlay",
         help="Show realtime subtitles in a floating window.",
     )
     overlay_parser.add_argument("--window-seconds", type=float, default=6.0)
-    overlay_parser.add_argument("--step-seconds", type=float, default=1.0)
+    overlay_parser.add_argument("--step-seconds", type=float, default=0.5)
     overlay_parser.add_argument("--stability-seconds", type=float, default=2.0)
     overlay_parser.add_argument("--device", default=None)
     overlay_parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE)
@@ -219,6 +226,11 @@ def build_parser() -> argparse.ArgumentParser:
     overlay_parser.add_argument("--model", default=DEFAULT_MODEL)
     overlay_parser.add_argument("--language", default=DEFAULT_LANGUAGE)
     overlay_parser.add_argument("--beam-size", type=int, default=DEFAULT_BEAM_SIZE)
+    overlay_parser.add_argument(
+        "--word-timestamps",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
 
     transcribe_parser = subparsers.add_parser(
         "transcribe",
@@ -236,8 +248,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    log_path = configure_logging()
     parser = build_parser()
     args = parser.parse_args()
+    print(f"Logs: {log_path}")
 
     try:
         if args.command == "capture":

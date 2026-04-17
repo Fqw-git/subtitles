@@ -5,6 +5,7 @@ from subtitles.asr.models import (
     SpeechRecognitionError,
     TranscriptResult,
     TranscriptSegment,
+    TranscriptWord,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "SpeechRecognitionError",
     "TranscriptResult",
     "TranscriptSegment",
+    "TranscriptWord",
 ]

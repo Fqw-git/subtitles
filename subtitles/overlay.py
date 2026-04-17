@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import queue
+import re
 import threading
 import tkinter as tk
 from dataclasses import dataclass
@@ -8,6 +10,9 @@ from dataclasses import dataclass
 from subtitles.asr import FasterWhisperRecognizer
 from subtitles.audio import PyAudioWasapiLoopbackCapturer
 from subtitles.demo import RealtimeDemoConfig, RealtimeSystemAudioTranscriptionDemo
+
+logger = logging.getLogger(__name__)
+SENTENCE_BREAK_RE = re.compile(r"(?<=[.!?。！？])\s+")
 
 
 @dataclass(frozen=True)
@@ -74,7 +79,7 @@ class SubtitleOverlayWindow:
             frame,
             textvariable=self.preview_var,
             font=("Microsoft YaHei UI", 16),
-            fg="#f2c66d",
+            fg="#9ba3af",
             bg="#111111",
             justify="center",
             wraplength=900,
@@ -98,6 +103,12 @@ class SubtitleOverlayWindow:
         self.committed_var.set(state.committed_text)
         self.preview_var.set(state.unstable_text)
         self.status_var.set(state.status_text)
+        logger.debug(
+            "Overlay state updated: committed=%r unstable=%r status=%r",
+            state.committed_text,
+            state.unstable_text,
+            state.status_text,
+        )
 
     def poll_queue(self, state_queue: queue.Queue, stop_event: threading.Event) -> None:
         while True:
@@ -136,8 +147,20 @@ class SubtitleOverlayApp:
             f"update={event.update_index}"
         )
 
+    def _format_subtitle_text(self, text: str) -> str:
+        normalized = " ".join(text.split()).strip()
+        if not normalized:
+            return ""
+
+        sentences = [part.strip() for part in SENTENCE_BREAK_RE.split(normalized) if part.strip()]
+        if not sentences:
+            return normalized
+
+        return "\n".join(sentences)
+
     def _worker(self) -> None:
         try:
+            logger.info("Overlay worker started")
             self.state_queue.put(
                 OverlaySubtitleState(
                     committed_text="",
@@ -149,8 +172,12 @@ class SubtitleOverlayApp:
                 if self.stop_event.is_set():
                     break
 
-                committed = event.transcript_delta.committed_text.strip()
-                preview = event.transcript_delta.unstable_text.strip()
+                committed = self._format_subtitle_text(
+                    event.transcript_delta.committed_text
+                )
+                preview = self._format_subtitle_text(
+                    event.transcript_delta.unstable_text
+                )
                 if not committed and not preview:
                     preview = "..."
 
@@ -162,6 +189,7 @@ class SubtitleOverlayApp:
                     )
                 )
         except Exception as exc:
+            logger.exception("Overlay worker failed")
             self.state_queue.put(
                 OverlaySubtitleState(
                     committed_text="",
@@ -170,6 +198,7 @@ class SubtitleOverlayApp:
                 )
             )
         finally:
+            logger.info("Overlay worker stopped")
             self.stop_event.set()
 
     def run(self) -> None:

@@ -31,4 +31,4 @@ Thumbs.db
 *.m4a
 *.flac
 *.json
-
+logs/

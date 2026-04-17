@@ -14,6 +14,15 @@ class SpeechRecognitionConfig:
     language: str
     beam_size: int
     vad_filter: bool = True
+    word_timestamps: bool = False
+
+
+@dataclass(frozen=True)
+class TranscriptWord:
+    start: float
+    end: float
+    word: str
+    probability: float | None = None
 
 
 @dataclass(frozen=True)
@@ -21,6 +30,7 @@ class TranscriptSegment:
     start: float
     end: float
     text: str
+    words: list[TranscriptWord]
 
 
 @dataclass(frozen=True)
