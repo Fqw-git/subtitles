@@ -31,6 +31,7 @@ from subtitles.io import print_transcript, save_transcript
 from subtitles.logging_utils import configure_logging
 from subtitles.overlay import SubtitleOverlayApp
 from subtitles.utils import resolve_output_path, validate_audio_file
+from subtitles.vad import VoiceActivityConfig, VoiceActivityError, WebRtcVoiceActivityDetector
 
 
 def build_capture_config(args: argparse.Namespace) -> AudioCaptureConfig:
@@ -49,6 +50,16 @@ def build_recognition_config(args: argparse.Namespace) -> SpeechRecognitionConfi
         language=args.language,
         beam_size=args.beam_size,
         word_timestamps=getattr(args, "word_timestamps", False),
+    )
+
+
+def build_vad_config(args: argparse.Namespace) -> VoiceActivityConfig:
+    return VoiceActivityConfig(
+        enabled=getattr(args, "vad", True),
+        aggressiveness=getattr(args, "vad_aggressiveness", 2),
+        frame_duration_ms=getattr(args, "vad_frame_ms", 30),
+        min_speech_duration_ms=getattr(args, "vad_min_speech_ms", 300),
+        sample_rate=16000,
     )
 
 
@@ -80,6 +91,7 @@ def handle_demo_command(args: argparse.Namespace) -> None:
     demo = RealtimeSystemAudioTranscriptionDemo(
         capturer=PyAudioWasapiLoopbackCapturer(),
         recognizer=FasterWhisperRecognizer(),
+        vad_detector=WebRtcVoiceActivityDetector(),
     )
 
     print("Starting realtime demo. Press Ctrl+C to stop.")
@@ -93,6 +105,7 @@ def handle_demo_command(args: argparse.Namespace) -> None:
                 device_name=args.device,
             ),
             recognition=build_recognition_config(args),
+            vad=build_vad_config(args),
             window_seconds=args.window_seconds,
             step_seconds=args.step_seconds,
             stability_seconds=args.stability_seconds,
@@ -131,6 +144,7 @@ def handle_overlay_command(args: argparse.Namespace) -> None:
                 device_name=args.device,
             ),
             recognition=build_recognition_config(args),
+            vad=build_vad_config(args),
             window_seconds=args.window_seconds,
             step_seconds=args.step_seconds,
             stability_seconds=args.stability_seconds,
@@ -210,6 +224,14 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
     )
+    demo_parser.add_argument(
+        "--vad",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    demo_parser.add_argument("--vad-aggressiveness", type=int, default=2)
+    demo_parser.add_argument("--vad-frame-ms", type=int, default=30)
+    demo_parser.add_argument("--vad-min-speech-ms", type=int, default=300)
 
     overlay_parser = subparsers.add_parser(
         "overlay",
@@ -231,6 +253,14 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
     )
+    overlay_parser.add_argument(
+        "--vad",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    overlay_parser.add_argument("--vad-aggressiveness", type=int, default=2)
+    overlay_parser.add_argument("--vad-frame-ms", type=int, default=30)
+    overlay_parser.add_argument("--vad-min-speech-ms", type=int, default=300)
 
     transcribe_parser = subparsers.add_parser(
         "transcribe",
@@ -282,7 +312,7 @@ def main() -> None:
                 suffix = " (default)" if device.is_default else ""
                 print(f"- {device.name}{suffix}")
             return
-    except (AudioCaptureError, SpeechRecognitionError, ValueError) as exc:
+    except (AudioCaptureError, SpeechRecognitionError, VoiceActivityError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
 
     raise SystemExit("Unknown command")

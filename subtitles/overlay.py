@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from subtitles.asr import FasterWhisperRecognizer
 from subtitles.audio import PyAudioWasapiLoopbackCapturer
 from subtitles.demo import RealtimeDemoConfig, RealtimeSystemAudioTranscriptionDemo
+from subtitles.vad import WebRtcVoiceActivityDetector
 
 logger = logging.getLogger(__name__)
 SENTENCE_BREAK_RE = re.compile(r"(?<=[.!?。！？])\s+")
@@ -28,15 +29,14 @@ class SubtitleOverlayWindow:
         self.root.title(title)
         self.root.attributes("-topmost", True)
         self.root.configure(bg="#111111")
-        self.root.geometry("960x180+280+820")
-        self.root.minsize(640, 120)
+        self.root.geometry("1100x280+220+760")
+        self.root.minsize(760, 180)
 
         self._drag_origin_x = 0
         self._drag_origin_y = 0
 
         self.status_var = tk.StringVar(value="Ready")
-        self.committed_var = tk.StringVar(value="")
-        self.preview_var = tk.StringVar(value="")
+        self.subtitle_text: tk.Text | None = None
 
         self._build_layout()
 
@@ -64,29 +64,55 @@ class SubtitleOverlayWindow:
         )
         status.pack(fill="x", pady=(4, 10))
 
-        committed = tk.Label(
+        subtitle_frame = tk.Frame(
             frame,
-            textvariable=self.committed_var,
-            font=("Microsoft YaHei UI", 20, "bold"),
+            bg="#111111",
+        )
+        subtitle_frame.pack(fill="both", expand=True)
+
+        scrollbar = tk.Scrollbar(subtitle_frame)
+        scrollbar.pack(side="right", fill="y")
+
+        subtitle_text = tk.Text(
+            subtitle_frame,
+            font=("Microsoft YaHei UI", 19, "bold"),
             fg="#f7f3e8",
             bg="#111111",
-            justify="center",
-            wraplength=900,
+            insertbackground="#f7f3e8",
+            relief="flat",
+            borderwidth=0,
+            wrap="word",
+            padx=8,
+            pady=8,
+            yscrollcommand=scrollbar.set,
+            spacing1=2,
+            spacing2=4,
+            spacing3=6,
+            cursor="arrow",
         )
-        committed.pack(fill="both", expand=True)
-
-        preview = tk.Label(
-            frame,
-            textvariable=self.preview_var,
-            font=("Microsoft YaHei UI", 16),
-            fg="#9ba3af",
-            bg="#111111",
+        subtitle_text.pack(side="left", fill="both", expand=True)
+        subtitle_text.tag_configure(
+            "committed",
+            foreground="#f7f3e8",
+            font=("Microsoft YaHei UI", 19, "bold"),
             justify="center",
-            wraplength=900,
         )
-        preview.pack(fill="x", pady=(8, 0))
+        subtitle_text.tag_configure(
+            "unstable",
+            foreground="#9ba3af",
+            font=("Microsoft YaHei UI", 17),
+            justify="center",
+        )
+        subtitle_text.tag_configure(
+            "gap",
+            spacing1=6,
+            spacing3=6,
+        )
+        subtitle_text.configure(state="disabled")
+        scrollbar.config(command=subtitle_text.yview)
+        self.subtitle_text = subtitle_text
 
-        for widget in [frame, header, status, committed, preview]:
+        for widget in [frame, header, status, subtitle_frame, subtitle_text]:
             widget.bind("<ButtonPress-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._drag_window)
 
@@ -100,8 +126,10 @@ class SubtitleOverlayWindow:
         self.root.geometry(f"+{x}+{y}")
 
     def update_state(self, state: OverlaySubtitleState) -> None:
-        self.committed_var.set(state.committed_text)
-        self.preview_var.set(state.unstable_text)
+        self._render_subtitles(
+            committed_text=state.committed_text,
+            unstable_text=state.unstable_text,
+        )
         self.status_var.set(state.status_text)
         logger.debug(
             "Overlay state updated: committed=%r unstable=%r status=%r",
@@ -109,6 +137,28 @@ class SubtitleOverlayWindow:
             state.unstable_text,
             state.status_text,
         )
+
+    def _render_subtitles(self, *, committed_text: str, unstable_text: str) -> None:
+        if self.subtitle_text is None:
+            return
+
+        self.subtitle_text.configure(state="normal")
+        self.subtitle_text.delete("1.0", tk.END)
+
+        if committed_text:
+            self.subtitle_text.insert(tk.END, committed_text, ("committed",))
+
+        if committed_text and unstable_text:
+            self.subtitle_text.insert(tk.END, "\n", ("gap",))
+
+        if unstable_text:
+            self.subtitle_text.insert(tk.END, unstable_text, ("unstable",))
+
+        if not committed_text and not unstable_text:
+            self.subtitle_text.insert(tk.END, "...", ("unstable",))
+
+        self.subtitle_text.configure(state="disabled")
+        self.subtitle_text.see(tk.END)
 
     def poll_queue(self, state_queue: queue.Queue, stop_event: threading.Event) -> None:
         while True:
@@ -137,6 +187,7 @@ class SubtitleOverlayApp:
         self.demo = RealtimeSystemAudioTranscriptionDemo(
             capturer=PyAudioWasapiLoopbackCapturer(),
             recognizer=FasterWhisperRecognizer(),
+            vad_detector=WebRtcVoiceActivityDetector(),
         )
         self.state_queue: queue.Queue[OverlaySubtitleState] = queue.Queue()
         self.stop_event = threading.Event()

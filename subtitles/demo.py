@@ -4,17 +4,19 @@ from dataclasses import dataclass
 
 from subtitles.asr import SpeechRecognitionConfig, SpeechRecognizer, TranscriptResult
 from subtitles.audio import AudioCaptureConfig, AudioCapturer
-from subtitles.streaming import TranscriptDelta
-from subtitles.streaming import (
+from subtitles.engine import TranscriptDelta
+from subtitles.engine import (
     StreamingRecognitionSession,
     StreamingSessionConfig,
 )
+from subtitles.vad import VoiceActivityConfig, VoiceActivityDetector
 
 
 @dataclass(frozen=True)
 class RealtimeDemoConfig:
     capture: AudioCaptureConfig
     recognition: SpeechRecognitionConfig
+    vad: VoiceActivityConfig
     window_seconds: float
     step_seconds: float
     stability_seconds: float
@@ -37,12 +39,14 @@ class RealtimeSystemAudioTranscriptionDemo:
         *,
         capturer: AudioCapturer,
         recognizer: SpeechRecognizer,
+        vad_detector: VoiceActivityDetector | None = None,
     ) -> None:
         self.capturer = capturer
         self.recognizer = recognizer
         self.session = StreamingRecognitionSession(
             capturer=capturer,
             recognizer=recognizer,
+            vad_detector=vad_detector,
         )
 
     def iter_events(self, config: RealtimeDemoConfig):
@@ -50,6 +54,7 @@ class RealtimeSystemAudioTranscriptionDemo:
             StreamingSessionConfig(
                 capture=config.capture,
                 recognition=config.recognition,
+                vad=config.vad,
                 window_seconds=config.window_seconds,
                 step_seconds=config.step_seconds,
                 stability_seconds=config.stability_seconds,

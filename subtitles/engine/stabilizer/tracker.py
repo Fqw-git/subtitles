@@ -1,24 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
 import re
 
 from subtitles.asr import TranscriptSegment, TranscriptWord
+from subtitles.engine.stabilizer.models import TranscriptDelta
 
 logger = logging.getLogger(__name__)
 
 LEADING_GUARD_SECONDS = 1.0
 MAX_ALIGNMENT_HEAD_SKIP_WORDS = 2
-
-
-@dataclass(frozen=True)
-class TranscriptDelta:
-    full_text: str
-    committed_text: str
-    committed_increment: str
-    unstable_text: str
-    is_revision: bool
 
 
 class TranscriptDeltaTracker:
@@ -237,7 +228,6 @@ class TranscriptDeltaTracker:
         pending_words: list[str],
     ) -> list[str]:
         unstable_words = list(dropped_prefix_words) + list(pending_words) + list(current_unstable_words)
-
         if not unstable_words:
             return []
         return unstable_words
