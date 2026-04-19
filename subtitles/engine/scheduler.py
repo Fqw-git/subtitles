@@ -6,7 +6,6 @@ import time
 from subtitles.asr import SpeechRecognizer
 from subtitles.engine.buffering import (
     BufferedAudioFrame,
-    SpeechAwareSnapshotExtractor,
 )
 from subtitles.engine.models import StreamingSessionConfig, StreamingSessionEvent
 from subtitles.engine.runtime import StreamingRuntime
@@ -32,7 +31,6 @@ class StreamingScheduler:
     ) -> None:
         next_trigger_time = config.step_seconds
         update_index = 0
-
         try:
             while not runtime.stop_event.is_set():
                 current_chunk_end = runtime.read_latest_chunk_end()
@@ -40,12 +38,7 @@ class StreamingScheduler:
                     time.sleep(0.01)
                     continue
 
-                snapshot = runtime.buffer.extract_snapshot(
-                    SpeechAwareSnapshotExtractor(
-                        max_window_seconds=config.window_seconds,
-                    ),
-                    target_sample_rate=config.vad.sample_rate,
-                )
+                snapshot = runtime.buffer.extract_snapshot()
                 window_frames = snapshot.frames
                 window_chunks = snapshot.chunks
                 waveform = snapshot.waveform
@@ -69,12 +62,13 @@ class StreamingScheduler:
                         vad_result.total_frames,
                         vad_result.speech_duration_ms,
                     )
+                    runtime.buffer.mark_snapshot(start_time=window_start, end_time=window_end)
                     next_trigger_time += config.step_seconds
                     continue
 
                 update_index += 1
                 logger.info(
-                    "Scheduler triggering ASR update=%s at trigger=%.3f window=%.3f-%.3f chunk_count=%s vad_speech_frames=%s vad_total_frames=%s",
+                    "Scheduler triggering ASR update=%s at trigger=%.3f window=%.3f-%.3f chunk_count=%s vad_speech_frames=%s vad_total_frames=%s selection_reason=%s committed_end=%.3f provisional_end=%.3f",
                     update_index,
                     next_trigger_time,
                     window_start,
@@ -82,6 +76,9 @@ class StreamingScheduler:
                     len(window_chunks),
                     vad_result.speech_frames,
                     vad_result.total_frames,
+                    snapshot.selection_reason,
+                    runtime.buffer.cursor.committed_end_time,
+                    runtime.buffer.cursor.provisional_end_time,
                 )
 
                 transcript_result = self.recognizer.transcribe(
@@ -90,17 +87,20 @@ class StreamingScheduler:
                 )
                 transcript_delta = delta_tracker.update(
                     transcript_result.segments,
-                    window_start=window_start,
-                    window_end=window_end,
-                    stability_seconds=config.stability_seconds,
+                    snapshot=snapshot,
                 )
+                runtime.buffer.mark_snapshot(start_time=window_start, end_time=window_end)
+                runtime.buffer.apply_delta(transcript_delta)
                 logger.info(
-                    "Streaming update=%s produced text=%r committed=%r unstable=%r revision=%s",
+                    "Streaming update=%s produced text=%r baseline=%r committed=%r unstable=%r revision=%s committed_end=%.3f provisional_end=%.3f",
                     update_index,
                     transcript_result.text,
+                    transcript_delta.baseline_text,
                     transcript_delta.committed_text,
                     transcript_delta.unstable_text,
                     transcript_delta.is_revision,
+                    runtime.buffer.cursor.committed_end_time,
+                    runtime.buffer.cursor.provisional_end_time,
                 )
 
                 runtime.event_queue.put(

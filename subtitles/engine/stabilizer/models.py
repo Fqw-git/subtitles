@@ -10,3 +10,7 @@ class TranscriptDelta:
     committed_increment: str
     unstable_text: str
     is_revision: bool
+    committed_end_time: float = 0.0
+    provisional_end_time: float = 0.0
+    baseline_text: str = ""
+    current_text: str = ""

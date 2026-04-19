@@ -1,4 +1,9 @@
-from subtitles.engine.buffering import BufferedAudioFrame, SlidingAudioBuffer
+from subtitles.engine.buffering import (
+    BufferedAudioFrame,
+    RecognitionBuffer,
+    RecognitionCursor,
+    SlidingAudioBuffer,
+)
 from subtitles.engine.capture_worker import StreamingCaptureWorker
 from subtitles.engine.models import StreamingSessionConfig, StreamingSessionEvent
 from subtitles.engine.runtime import StreamingRuntime
@@ -8,6 +13,8 @@ from subtitles.engine.stabilizer import TranscriptDelta, TranscriptDeltaTracker
 
 __all__ = [
     "BufferedAudioFrame",
+    "RecognitionCursor",
+    "RecognitionBuffer",
     "SlidingAudioBuffer",
     "StreamingCaptureWorker",
     "TranscriptDelta",

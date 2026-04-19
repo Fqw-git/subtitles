@@ -4,13 +4,13 @@ from dataclasses import dataclass, field
 import queue
 import threading
 
-from subtitles.engine.buffering import SlidingAudioBuffer
+from subtitles.engine.buffering import RecognitionBuffer
 from subtitles.engine.models import StreamingSessionEvent
 
 
 @dataclass
 class StreamingRuntime:
-    buffer: SlidingAudioBuffer
+    buffer: RecognitionBuffer
     event_queue: queue.Queue[StreamingSessionEvent | Exception | object]
     stop_event: threading.Event = field(default_factory=threading.Event)
     latest_chunk_end: float = 0.0

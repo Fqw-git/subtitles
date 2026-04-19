@@ -6,7 +6,7 @@ import threading
 
 from subtitles.asr import SpeechRecognizer
 from subtitles.audio import AudioCapturer
-from subtitles.engine.buffering import SlidingAudioBuffer
+from subtitles.engine.buffering import RecognitionBuffer, SlidingAudioBuffer
 from subtitles.engine.capture_worker import StreamingCaptureWorker
 from subtitles.engine.models import StreamingSessionConfig
 from subtitles.engine.runtime import StreamingRuntime
@@ -40,10 +40,21 @@ class StreamingRecognitionSession:
         self._validate_config(config)
 
         runtime = StreamingRuntime(
-            buffer=SlidingAudioBuffer(max_duration_seconds=config.window_seconds),
+            buffer=RecognitionBuffer(
+                audio_buffer=SlidingAudioBuffer(
+                    max_duration_seconds=max(
+                        config.window_seconds * 2,
+                        config.window_seconds + 3.0,
+                    )
+                ),
+                max_window_seconds=config.window_seconds,
+                target_sample_rate=config.vad.sample_rate,
+            ),
             event_queue=queue.Queue(),
         )
-        delta_tracker = TranscriptDeltaTracker()
+        delta_tracker = TranscriptDeltaTracker(
+            stability_seconds=config.stability_seconds,
+        )
 
         capture_thread = threading.Thread(
             target=self.capture_worker.run,

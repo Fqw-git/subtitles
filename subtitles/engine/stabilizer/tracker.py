@@ -1,372 +1,259 @@
 from __future__ import annotations
 
 import logging
-import re
+from typing import TYPE_CHECKING
 
-from subtitles.asr import TranscriptSegment, TranscriptWord
+from subtitles.asr import TranscriptSegment
+from subtitles.engine.stabilizer.alignment import find_best_local_alignment
 from subtitles.engine.stabilizer.models import TranscriptDelta
+from subtitles.engine.stabilizer.state import DeltaResolution, DeltaUpdateInputs
+from subtitles.engine.stabilizer.text import join_tokens
+from subtitles.engine.stabilizer.tokens import (
+    TimedToken,
+    build_committed_tail,
+    flatten_tokens,
+    stable_prefix_length,
+)
+
+if TYPE_CHECKING:
+    from subtitles.engine.buffering.snapshot import BufferSnapshot
 
 logger = logging.getLogger(__name__)
 
-LEADING_GUARD_SECONDS = 1.0
+ALIGNMENT_TAIL_MAX_WORDS = 24
 MAX_ALIGNMENT_HEAD_SKIP_WORDS = 2
+UNSTABLE_SNAPSHOT_HEAD_TRIM_TOKENS = 1
 
 
 class TranscriptDeltaTracker:
-    def __init__(self) -> None:
-        self._committed_words: list[str] = []
-        self._pending_words: list[str] = []
+    def __init__(self, stability_seconds: float = 0.5) -> None:
+        if stability_seconds < 0:
+            raise ValueError("stability_seconds must be greater than or equal to 0.")
+
+        self.stability_seconds = stability_seconds
+        self._committed_tokens: list[TimedToken] = []
+        self._pending_tokens: list[TimedToken] = []
 
     def update(
         self,
         segments: list[TranscriptSegment],
         *,
-        window_start: float,
-        window_end: float,
-        stability_seconds: float,
+        snapshot: BufferSnapshot,
     ) -> TranscriptDelta:
-        if stability_seconds < 0:
-            raise ValueError("stability_seconds must be greater than or equal to 0.")
-
-        previous_committed_words = list(self._committed_words)
-        previous_pending_words = list(self._pending_words)
-        stable_cutoff = window_end - stability_seconds
-        leading_guard_seconds = 0.0
-        if previous_committed_words:
-            leading_guard_seconds = min(
-                LEADING_GUARD_SECONDS,
-                max(0.0, (window_end - window_start) / 2),
-            )
-        leading_guard_cutoff = window_start + leading_guard_seconds
-        logger.debug(
-            "Delta update start: window_start=%.3f window_end=%.3f stability_seconds=%.3f stable_cutoff=%.3f leading_guard_seconds=%.3f leading_guard_cutoff=%.3f previous_committed=%r previous_pending=%r segment_count=%s",
-            window_start,
-            window_end,
-            stability_seconds,
-            stable_cutoff,
-            leading_guard_seconds,
-            leading_guard_cutoff,
-            self._join_words(previous_committed_words),
-            self._join_words(previous_pending_words),
-            len(segments),
+        update_inputs = self._prepare_update_inputs(
+            segments=segments,
+            snapshot=snapshot,
         )
-        words = self._flatten_words(segments)
-        if words:
-            logger.debug("Delta using word-level timestamps: word_count=%s", len(words))
-            current_committed_words, current_unstable_words = self._build_word_partitions(
-                words=words,
-                window_start=window_start,
-                leading_guard_cutoff=leading_guard_cutoff,
-                stable_cutoff=stable_cutoff,
-            )
-        else:
-            logger.debug("Delta falling back to segment-level timestamps")
-            current_committed_words, current_unstable_words = self._build_segment_partitions(
-                segments=segments,
-                window_start=window_start,
-                leading_guard_cutoff=leading_guard_cutoff,
-                stable_cutoff=stable_cutoff,
-            )
 
-        current_committed_text = self._join_words(current_committed_words)
-        if not current_committed_words:
-            unstable_words = list(previous_pending_words) + list(current_unstable_words)
-            delta = TranscriptDelta(
-                full_text="\n".join(
-                    part
-                    for part in [
-                        self._join_words(self._committed_words),
-                        self._join_words(unstable_words),
-                    ]
-                    if part
-                ),
-                committed_text=self._join_words(self._committed_words),
-                committed_increment="",
-                unstable_text=self._join_words(unstable_words),
+        logger.debug(
+            "Delta update start: window_start=%.3f window_end=%.3f starts_with_speech_start=%s current_tokens_trimmed=%s stable_cutoff=%.3f committed_end_time=%.3f baseline=%r current=%r committed_tail=%r pending=%r",
+            snapshot.window_start,
+            snapshot.window_end,
+            snapshot.starts_with_speech_start,
+            update_inputs.current_tokens_trimmed,
+            update_inputs.stable_cutoff,
+            snapshot.committed_end_time,
+            update_inputs.baseline_text,
+            update_inputs.current_text,
+            join_tokens(update_inputs.committed_tail_tokens),
+            join_tokens(self._pending_tokens),
+        )
+
+        if not update_inputs.current_tokens:
+            delta = self._build_delta(
+                confirmed_tokens=[],
+                next_pending_tokens=self._pending_tokens,
                 is_revision=False,
+                committed_end_time=snapshot.committed_end_time,
+                provisional_end_time=snapshot.committed_end_time,
+                baseline_text=update_inputs.baseline_text,
+                current_text=update_inputs.current_text,
             )
-            logger.debug("Delta result with no committed words: %s", delta)
+            logger.debug("Delta update with empty current tokens: %s", delta)
             return delta
 
-        head_skip_words, overlap_length = self._find_best_alignment(
-            previous_words=previous_committed_words,
-            current_words=current_committed_words,
-        )
-        aligned_current_committed_words = current_committed_words[head_skip_words:]
-        candidate_words = aligned_current_committed_words[overlap_length:]
+        if not update_inputs.baseline_tokens:
+            next_pending_tokens = update_inputs.current_tokens
+            delta = self._build_delta(
+                confirmed_tokens=[],
+                next_pending_tokens=next_pending_tokens,
+                is_revision=False,
+                committed_end_time=snapshot.committed_end_time,
+                provisional_end_time=update_inputs.current_tokens[-1].end,
+                baseline_text=update_inputs.baseline_text,
+                current_text=update_inputs.current_text,
+            )
+            self._pending_tokens = next_pending_tokens
+            logger.debug("Delta bootstrap pending initialized: %s", delta)
+            return delta
 
-        confirmed_words, next_pending_words = self._confirm_pending_words(
-            previous_pending_words=previous_pending_words,
-            candidate_words=candidate_words,
+        resolution = self._resolve_delta(
+            update_inputs=update_inputs,
+            committed_end_time=snapshot.committed_end_time,
         )
-        if confirmed_words:
-            self._committed_words.extend(confirmed_words)
-        self._pending_words = next_pending_words
+        delta = self._build_delta(
+            confirmed_tokens=resolution.confirmed_tokens,
+            next_pending_tokens=resolution.next_pending_tokens,
+            is_revision=resolution.is_revision,
+            committed_end_time=resolution.committed_end_time,
+            provisional_end_time=resolution.provisional_end_time,
+            baseline_text=update_inputs.baseline_text,
+            current_text=update_inputs.current_text,
+        )
+        self._apply_resolution(resolution)
+        logger.debug(
+            "Delta final result: baseline_skip_words=%s current_skip_words=%s matched_prefix_length=%s confirmed=%r next_pending=%r committed_end_time=%.3f provisional_end_time=%.3f delta=%s",
+            resolution.baseline_skip_words,
+            resolution.current_skip_words,
+            resolution.matched_prefix_length,
+            join_tokens(resolution.confirmed_tokens),
+            join_tokens(resolution.next_pending_tokens),
+            delta.committed_end_time,
+            delta.provisional_end_time,
+            delta,
+        )
+        return delta
 
-        committed_text = self._join_words(self._committed_words)
-        committed_increment = self._join_words(confirmed_words)
-        unstable_words = self._build_unstable_words(
-            dropped_prefix_words=current_committed_words[:head_skip_words],
-            current_committed_words=aligned_current_committed_words,
-            current_unstable_words=current_unstable_words,
-            pending_words=self._pending_words,
+    def _prepare_update_inputs(
+        self,
+        *,
+        segments: list[TranscriptSegment],
+        snapshot: BufferSnapshot,
+    ) -> DeltaUpdateInputs:
+        stable_cutoff = snapshot.window_end - self.stability_seconds
+        raw_current_tokens = flatten_tokens(segments, window_start=snapshot.window_start)
+        current_tokens, current_tokens_trimmed = self._prepare_current_tokens(
+            raw_current_tokens,
+            starts_with_speech_start=snapshot.starts_with_speech_start,
         )
-        unstable_text = self._join_words(unstable_words)
+        committed_tail_tokens = build_committed_tail(
+            self._committed_tokens,
+            snapshot_start_time=snapshot.window_start,
+            committed_end_time=snapshot.committed_end_time,
+            alignment_tail_max_words=ALIGNMENT_TAIL_MAX_WORDS,
+        )
+        baseline_tokens = committed_tail_tokens + list(self._pending_tokens)
+        return DeltaUpdateInputs(
+            stable_cutoff=stable_cutoff,
+            current_tokens=current_tokens,
+            current_tokens_trimmed=current_tokens_trimmed,
+            committed_tail_tokens=committed_tail_tokens,
+            baseline_tokens=baseline_tokens,
+            baseline_text=join_tokens(baseline_tokens),
+            current_text=join_tokens(current_tokens),
+        )
+
+    def _prepare_current_tokens(
+        self,
+        current_tokens: list[TimedToken],
+        *,
+        starts_with_speech_start: bool,
+    ) -> tuple[list[TimedToken], bool]:
+        if starts_with_speech_start:
+            return (current_tokens, False)
+
+        trim_count = min(UNSTABLE_SNAPSHOT_HEAD_TRIM_TOKENS, len(current_tokens))
+        if trim_count <= 0:
+            return (current_tokens, False)
+
+        return (current_tokens[trim_count:], True)
+
+    def _resolve_delta(
+        self,
+        *,
+        update_inputs: DeltaUpdateInputs,
+        committed_end_time: float,
+    ) -> DeltaResolution:
+        alignment = find_best_local_alignment(
+            baseline_tokens=update_inputs.baseline_tokens,
+            current_tokens=update_inputs.current_tokens,
+            max_head_skip_words=MAX_ALIGNMENT_HEAD_SKIP_WORDS,
+        )
+        committed_tail_length = len(update_inputs.committed_tail_tokens)
+        pending_start = committed_tail_length
+        overlap_start = alignment.baseline_start
+        overlap_end = alignment.baseline_start + alignment.matched_length
+        pending_overlap_start = max(pending_start, overlap_start)
+        pending_overlap_end = max(
+            pending_overlap_start,
+            min(overlap_end, len(update_inputs.baseline_tokens)),
+        )
+        overlap_pending_length = pending_overlap_end - pending_overlap_start
+        current_pending_start = alignment.current_start + max(
+            0,
+            pending_start - overlap_start,
+        )
+        candidate_confirmed_start = alignment.current_start + max(
+            0,
+            pending_overlap_start - overlap_start,
+        )
+        candidate_confirmed_tokens = update_inputs.current_tokens[
+            candidate_confirmed_start : candidate_confirmed_start + overlap_pending_length
+        ]
+        can_confirm_overlap = pending_overlap_start == pending_start
+        if not can_confirm_overlap:
+            candidate_confirmed_tokens = []
+        confirmed_length = stable_prefix_length(
+            candidate_confirmed_tokens,
+            stable_cutoff=update_inputs.stable_cutoff,
+        )
+        confirmed_tokens = candidate_confirmed_tokens[:confirmed_length]
+        preserved_pending_prefix = update_inputs.baseline_tokens[
+            pending_start:pending_overlap_start
+        ]
+        if alignment.matched_length > 0:
+            current_pending_tokens = update_inputs.current_tokens[current_pending_start:]
+            next_pending_tokens = preserved_pending_prefix + current_pending_tokens[
+                confirmed_length:
+            ]
+        else:
+            next_pending_tokens = update_inputs.current_tokens
+        next_committed_end_time = committed_end_time
+        if confirmed_tokens:
+            next_committed_end_time = max(next_committed_end_time, confirmed_tokens[-1].end)
+        provisional_source_tokens = next_pending_tokens or confirmed_tokens
+        provisional_end_time = committed_end_time
+        if provisional_source_tokens:
+            provisional_end_time = provisional_source_tokens[-1].end
+
+        return DeltaResolution(
+            confirmed_tokens=confirmed_tokens,
+            next_pending_tokens=next_pending_tokens,
+            committed_end_time=next_committed_end_time,
+            provisional_end_time=provisional_end_time,
+            is_revision=bool(self._pending_tokens) and alignment.matched_length == 0,
+            baseline_skip_words=alignment.baseline_start,
+            current_skip_words=alignment.current_start,
+            matched_prefix_length=alignment.matched_length,
+        )
+
+    def _apply_resolution(self, resolution: DeltaResolution) -> None:
+        self._committed_tokens.extend(resolution.confirmed_tokens)
+        self._pending_tokens = resolution.next_pending_tokens
+
+    def _build_delta(
+        self,
+        *,
+        confirmed_tokens: list[TimedToken],
+        next_pending_tokens: list[TimedToken],
+        is_revision: bool,
+        committed_end_time: float,
+        provisional_end_time: float,
+        baseline_text: str,
+        current_text: str,
+    ) -> TranscriptDelta:
+        committed_text = join_tokens(self._committed_tokens + confirmed_tokens)
+        committed_increment = join_tokens(confirmed_tokens)
+        unstable_text = join_tokens(next_pending_tokens)
         full_text = "\n".join(part for part in [committed_text, unstable_text] if part)
-        is_revision = (
-            bool(previous_committed_words)
-            and overlap_length == 0
-            and head_skip_words == 0
-            and bool(candidate_words)
-        )
-
-        delta = TranscriptDelta(
+        return TranscriptDelta(
             full_text=full_text,
             committed_text=committed_text,
             committed_increment=committed_increment,
             unstable_text=unstable_text,
             is_revision=is_revision,
+            committed_end_time=committed_end_time,
+            provisional_end_time=provisional_end_time,
+            baseline_text=baseline_text,
+            current_text=current_text,
         )
-        logger.debug(
-            "Delta final result: head_skip_words=%s overlap_length=%s previous=%r current=%r aligned_current=%r candidate=%r confirmed=%r next_pending=%r delta=%s",
-            head_skip_words,
-            overlap_length,
-            self._join_words(previous_committed_words),
-            current_committed_text,
-            self._join_words(aligned_current_committed_words),
-            self._join_words(candidate_words),
-            committed_increment,
-            self._join_words(self._pending_words),
-            delta,
-        )
-        return delta
-
-    def _flatten_words(self, segments: list[TranscriptSegment]) -> list[TranscriptWord]:
-        words: list[TranscriptWord] = []
-        for segment in segments:
-            words.extend(segment.words)
-        return words
-
-    def _build_word_partitions(
-        self,
-        *,
-        words: list[TranscriptWord],
-        window_start: float,
-        leading_guard_cutoff: float,
-        stable_cutoff: float,
-    ) -> tuple[list[str], list[str]]:
-        committed_words: list[str] = []
-        unstable_words: list[str] = []
-
-        for word in words:
-            absolute_start = window_start + word.start
-            absolute_end = window_start + word.end
-            in_leading_guard = absolute_start < leading_guard_cutoff
-            logger.debug(
-                "Delta word: rel_start=%.3f rel_end=%.3f abs_start=%.3f abs_end=%.3f word=%r leading_guard=%s committed=%s",
-                word.start,
-                word.end,
-                absolute_start,
-                absolute_end,
-                word.word,
-                in_leading_guard,
-                (not in_leading_guard) and absolute_end <= stable_cutoff,
-            )
-            if in_leading_guard:
-                continue
-            if absolute_end <= stable_cutoff:
-                committed_words.append(word.word)
-            else:
-                unstable_words.append(word.word)
-
-        return (committed_words, unstable_words)
-
-    def _build_segment_partitions(
-        self,
-        *,
-        segments: list[TranscriptSegment],
-        window_start: float,
-        leading_guard_cutoff: float,
-        stable_cutoff: float,
-    ) -> tuple[list[str], list[str]]:
-        committed_words: list[str] = []
-        unstable_words: list[str] = []
-
-        for segment in segments:
-            text = segment.text.strip()
-            if not text:
-                continue
-
-            absolute_start = window_start + segment.start
-            absolute_end = window_start + segment.end
-            in_leading_guard = absolute_start < leading_guard_cutoff
-            logger.debug(
-                "Delta segment: rel_start=%.3f rel_end=%.3f abs_start=%.3f abs_end=%.3f text=%r leading_guard=%s committed=%s",
-                segment.start,
-                segment.end,
-                absolute_start,
-                absolute_end,
-                text,
-                in_leading_guard,
-                (not in_leading_guard) and absolute_end <= stable_cutoff,
-            )
-            if in_leading_guard:
-                continue
-            if absolute_end <= stable_cutoff:
-                committed_words.extend(self._tokenize_text(text))
-            else:
-                unstable_words.extend(self._tokenize_text(text))
-
-        return (committed_words, unstable_words)
-
-    def _build_unstable_words(
-        self,
-        *,
-        dropped_prefix_words: list[str],
-        current_committed_words: list[str],
-        current_unstable_words: list[str],
-        pending_words: list[str],
-    ) -> list[str]:
-        unstable_words = list(dropped_prefix_words) + list(pending_words) + list(current_unstable_words)
-        if not unstable_words:
-            return []
-        return unstable_words
-
-    def _confirm_pending_words(
-        self,
-        *,
-        previous_pending_words: list[str],
-        candidate_words: list[str],
-    ) -> tuple[list[str], list[str]]:
-        if not candidate_words:
-            logger.debug(
-                "Delta pending unchanged: previous_pending=%r candidate=%r",
-                self._join_words(previous_pending_words),
-                self._join_words(candidate_words),
-            )
-            return ([], previous_pending_words)
-
-        if not previous_pending_words:
-            logger.debug(
-                "Delta pending initialized: candidate=%r",
-                self._join_words(candidate_words),
-            )
-            return ([], candidate_words)
-
-        skip_words, overlap_length = self._find_best_alignment(
-            previous_words=previous_pending_words,
-            current_words=candidate_words,
-        )
-        aligned_candidate_words = candidate_words[skip_words:]
-        if overlap_length <= 0:
-            logger.debug(
-                "Delta pending replaced: previous_pending=%r candidate=%r",
-                self._join_words(previous_pending_words),
-                self._join_words(candidate_words),
-            )
-            return ([], candidate_words)
-
-        confirmed_words = aligned_candidate_words[:overlap_length]
-        next_pending_words = aligned_candidate_words[overlap_length:]
-        logger.debug(
-            "Delta pending confirmed: skip_words=%s overlap_length=%s previous_pending=%r candidate=%r confirmed=%r next_pending=%r",
-            skip_words,
-            overlap_length,
-            self._join_words(previous_pending_words),
-            self._join_words(candidate_words),
-            self._join_words(confirmed_words),
-            self._join_words(next_pending_words),
-        )
-        return (confirmed_words, next_pending_words)
-
-    def _join_words(self, words: list[str]) -> str:
-        if not words:
-            return ""
-
-        text = ""
-        punctuation = {".", ",", "!", "?", ":", ";", "%", ")", "]", "}", "'s", "n't", "'re", "'ve", "'ll", "'d", "'m"}
-        opening = {"(", "[", "{", '"', "'"}
-
-        for raw_word in words:
-            word = raw_word.strip()
-            if not word:
-                continue
-
-            if not text:
-                text = word
-                continue
-
-            if word in punctuation or word.startswith(("'", ".", ",", "!", "?", ":", ";")):
-                text += word
-            elif text[-1] in "([{\"'":
-                text += word
-            elif word in opening:
-                text += " " + word
-            else:
-                text += " " + word
-
-        return text.strip()
-
-    def _find_overlap_length(
-        self,
-        *,
-        previous_words: list[str],
-        current_words: list[str],
-    ) -> int:
-        if not previous_words or not current_words:
-            return 0
-
-        max_overlap = min(len(previous_words), len(current_words))
-        for overlap_length in range(max_overlap, 0, -1):
-            previous_slice = previous_words[-overlap_length:]
-            current_slice = current_words[:overlap_length]
-            if self._normalized_words(previous_slice) == self._normalized_words(current_slice):
-                return overlap_length
-
-        return 0
-
-    def _find_best_alignment(
-        self,
-        *,
-        previous_words: list[str],
-        current_words: list[str],
-    ) -> tuple[int, int]:
-        if not current_words:
-            return (0, 0)
-
-        best_skip_words = 0
-        best_overlap_length = self._find_overlap_length(
-            previous_words=previous_words,
-            current_words=current_words,
-        )
-        max_skip_words = min(MAX_ALIGNMENT_HEAD_SKIP_WORDS, len(current_words) - 1)
-        for skip_words in range(1, max_skip_words + 1):
-            overlap_length = self._find_overlap_length(
-                previous_words=previous_words,
-                current_words=current_words[skip_words:],
-            )
-            if overlap_length > best_overlap_length:
-                best_skip_words = skip_words
-                best_overlap_length = overlap_length
-
-        if best_skip_words > 0:
-            logger.debug(
-                "Delta alignment skipped current prefix words: skip_words=%s skipped=%r overlap_length=%s",
-                best_skip_words,
-                self._join_words(current_words[:best_skip_words]),
-                best_overlap_length,
-            )
-
-        return (best_skip_words, best_overlap_length)
-
-    def _normalized_words(self, words: list[str]) -> list[str]:
-        return [self._normalize_word(word) for word in words]
-
-    def _normalize_word(self, word: str) -> str:
-        normalized = word.strip().lower()
-        normalized = normalized.replace("\u2019", "'")
-        normalized = re.sub(r"^[^\w']+|[^\w']+$", "", normalized)
-        return normalized
-
-    def _tokenize_text(self, text: str) -> list[str]:
-        return [token for token in text.split() if token]
